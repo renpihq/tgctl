@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2f3a"/>
+      <stop offset="1" stop-color="#15171c"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+  <!-- terminal prompt -->
+  <path d="M60 92 L104 128 L60 164" fill="none" stroke="#7fb8ff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- stacked layers = terragrunt units -->
+  <g stroke-linejoin="round" stroke-width="14" fill="none">
+    <path d="M128 150 L166 170 L204 150" stroke="#5fd36b"/>
+    <path d="M128 122 L166 142 L204 122" stroke="#f5c542"/>
+    <path d="M166 70 L204 92 L166 114 L128 92 Z" stroke="#ff6b6b"/>
+  </g>
+  <!-- log line -->
+  <rect x="60" y="190" width="136" height="14" rx="7" fill="#8b8f9c"/>
+</svg>
