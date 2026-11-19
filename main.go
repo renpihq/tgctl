@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -192,10 +193,8 @@ func run(args []string) error {
 			return fmt.Errorf("login failed: %v", err)
 		}
 	}
-	sts := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text")
-	sts.Env = append(os.Environ(), "AWS_PROFILE="+r.Profile)
-	if out, e := sts.CombinedOutput(); e != nil {
-		return fmt.Errorf("profile %s: not logged in: %s", r.Profile, strings.TrimSpace(string(out)))
+	if err := stsCheck(r.Profile); err != nil {
+		return err
 	}
 
 	// remember the profile, open the log, run
@@ -205,44 +204,115 @@ func run(args []string) error {
 		os.WriteFile(memo, b, 0o644)
 	}
 	now := time.Now()
-	act := strings.ReplaceAll(r.Action, " ", "_")
-	dir := filepath.Join(logRoot, u.Repo, u.Rel, now.Format("2006/01/02"), act, gitBranch(u.Abs))
-	os.MkdirAll(dir, 0o755)
-	logFile := filepath.Join(dir, fmt.Sprintf("%s-%s-tf-%s.log", now.Format("2006-01-02T15-04-05"), r.Profile, act))
-	f, err := os.Create(logFile)
+	f, err := openLog(logRoot, u, r, argv, now)
 	if err != nil {
 		return err
 	}
+	l := &live{logFile: f.Name(), running: true}
+	if dangerous[r.Action] {
+		l.confirm = fmt.Sprintf("Really rerun %s on %s/%s with %s?", r.Action, u.Repo, u.Rel, r.Profile)
+	}
+	l.rerun = func() (string, error) {
+		now := time.Now()
+		f, err := openLog(logRoot, u, r, argv, now)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(os.Stderr, "> rerun: %s\n", f.Name())
+		go func() {
+			// no interactive login from the browser: a stale session is reported in the log
+			e := ssoValid()
+			if e == nil {
+				e = stsCheck(r.Profile)
+			}
+			if e != nil {
+				fmt.Fprintf(io.MultiWriter(f, os.Stdout), "\n# FAILED: %v — run: aws sso login --profile %s\n", e, r.Profile)
+				f.Close()
+			} else {
+				e = execute(u, r, argv, f, now, nil)
+			}
+			l.end(e)
+		}()
+		return f.Name(), nil
+	}
+	stop := serveLog(l)
+	l.end(execute(u, r, argv, f, now, os.Stdin))
+	stop()
+	return l.err
+}
+
+// stsCheck is the cheap sanity check after ssoValid: the profile resolves to an account.
+func stsCheck(profile string) error {
+	sts := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text")
+	sts.Env = append(os.Environ(), "AWS_PROFILE="+profile)
+	if out, e := sts.CombinedOutput(); e != nil {
+		return fmt.Errorf("profile %s: not logged in: %s", profile, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// logPath: <logRoot>/<repo>/<unit>/<yyyy/mm/dd>/<action>/<branch>/<ts>-<profile>-tf-<action>.log
+func logPath(logRoot string, u Unit, r Req, now time.Time) string {
+	act := strings.ReplaceAll(r.Action, " ", "_")
+	return filepath.Join(logRoot, u.Repo, u.Rel, now.Format("2006/01/02"), act, gitBranch(u.Abs),
+		fmt.Sprintf("%s-%s-tf-%s.log", now.Format("2006-01-02T15-04-05"), r.Profile, act))
+}
+
+// openLog creates the log file for a run and writes its header (also to the terminal).
+func openLog(logRoot string, u Unit, r Req, argv []string, now time.Time) (*os.File, error) {
+	logFile := logPath(logRoot, u, r, now)
+	os.MkdirAll(filepath.Dir(logFile), 0o755)
+	f, err := os.Create(logFile)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(io.MultiWriter(f, os.Stdout), "# %s\n# AWS_PROFILE=%s\n# %s %s\n# log: %s\n\n", now.Format(time.RFC3339), r.Profile, u.Tool, strings.Join(argv, " "), logFile)
+	return f, nil
+}
+
+// execute runs the tool with output tee'd to f and the terminal, appends the footer, runs TGCTL_OPEN.
+// stdin is os.Stdin from the CLI and nil (no TTY) for reruns from the page.
+func execute(u Unit, r Req, argv []string, f *os.File, now time.Time, stdin io.Reader) error {
 	defer f.Close()
 	w := io.MultiWriter(f, os.Stdout)
-	cmdline := u.Tool + " " + strings.Join(argv, " ")
-	fmt.Fprintf(w, "# %s\n# AWS_PROFILE=%s\n# %s\n# log: %s\n\n", now.Format(time.RFC3339), r.Profile, cmdline, logFile)
 	c := exec.Command(u.Tool, argv...)
 	c.Dir = u.Abs
 	c.Env = append(os.Environ(), "AWS_PROFILE="+r.Profile, "TF_IN_AUTOMATION=1", "TF_DATA_DIR=", "TG_NO_COLOR=1", "TG_LOG_FORMAT=bare", "NO_COLOR=1", "TERM=dumb")
-	c.Stdout, c.Stderr, c.Stdin = w, w, os.Stdin
-	stop := serveLog(logFile)
+	c.Stdout, c.Stderr, c.Stdin = w, w, stdin
 	runErr := c.Run()
 	el := time.Since(now).Round(time.Second)
 	if runErr != nil {
 		fmt.Fprintf(w, "\n# FAILED after %s: %v\n", el, runErr)
-		if b, _ := os.ReadFile(logFile); strings.Contains(string(b), "UnauthorizedException") || strings.Contains(string(b), "No valid credential sources") {
+		if b, _ := os.ReadFile(f.Name()); strings.Contains(string(b), "UnauthorizedException") || strings.Contains(string(b), "No valid credential sources") {
 			fmt.Fprintf(os.Stderr, "\n>> AWS SSO session for %s is invalid (the CLI cache hid it): aws sso login --profile %s, then retry\n", r.Profile, r.Profile)
 		}
 	} else {
 		fmt.Fprintf(w, "\n# OK in %s\n", el)
 	}
 	if op := os.Getenv("TGCTL_OPEN"); op != "" {
-		exec.Command(op, logFile).Start()
+		exec.Command(op, f.Name()).Start()
 	}
-	stop()
 	return runErr
 }
+
+// live is the state behind the log page: the log shown now, whether a run is in progress,
+// the result of the last run (= process exit status), and how to start the same run again.
+type live struct {
+	mu      sync.Mutex
+	logFile string
+	running bool
+	err     error
+	confirm string                 // confirm() text on the page for dangerous actions, "" otherwise
+	rerun   func() (string, error) // creates the next log file, runs in the background, returns the log path
+}
+
+func (l *live) path() string  { l.mu.Lock(); defer l.mu.Unlock(); return l.logFile }
+func (l *live) end(err error) { l.mu.Lock(); l.running, l.err = false, err; l.mu.Unlock() }
 
 // serveLog serves the log on a loopback port with a live-updating page, opens the browser,
 // and returns a stop func that waits for Enter in the terminal or the Quit button on the page.
 // TGCTL_PORT pins the port (default: random); TGCTL_BROWSER overrides the opener.
-func serveLog(logFile string) func() {
+func serveLog(l *live) func() {
 	ln, err := net.Listen("tcp", "127.0.0.1:"+env("TGCTL_PORT", "0"))
 	if err != nil {
 		return func() {}
@@ -251,14 +321,15 @@ func serveLog(logFile string) func() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, logPage, filepath.Base(logFile), logFile)
+		lf := l.path()
+		fmt.Fprintf(w, logPage, filepath.Base(lf), lf, l.confirm)
 	})
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Write(iconSVG)
 	})
 	mux.HandleFunc("/raw", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := os.ReadFile(logFile)
+		b, _ := os.ReadFile(l.path())
 		if r.URL.Query().Get("view") == "" { // fetch() from the page: plain text
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Write(b)
@@ -268,6 +339,31 @@ func serveLog(logFile string) func() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#1b1d23;color:#d6d8de"><pre id="l" style="padding:12px;font:14px/1.5 ui-monospace,monospace;white-space:pre-wrap"></pre>
 <script>let n=0;async function f(){const s=await (await fetch('/raw')).text();if(s.length===n)return;n=s.length;document.getElementById('l').textContent=s;window.scrollTo(0,document.body.scrollHeight);if(/\n# (OK in|FAILED)/.test(s))clearInterval(t)}const t=setInterval(f,1500);f()</script>`)
+	})
+	mux.HandleFunc("/rerun", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		l.mu.Lock()
+		if l.running {
+			l.mu.Unlock()
+			http.Error(w, "already running", http.StatusConflict)
+			return
+		}
+		l.running = true
+		l.mu.Unlock()
+		p, err := l.rerun()
+		if err != nil {
+			l.end(err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		l.mu.Lock()
+		l.logFile = p
+		l.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, p)
 	})
 	mux.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "bye")
@@ -320,9 +416,15 @@ const logPage = `<!doctype html><html><head><meta charset="utf-8"><title>%s</tit
 <label><input type="checkbox" id="follow" checked> follow</label>
 <button title="copy log to clipboard" onclick="fetch('/raw').then(r=>r.text()).then(t=>navigator.clipboard.writeText(t)).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
 <button onclick="location.href='/raw?view=1'">raw</button>
+<button id="rrb" title="run the same command again into a new log" onclick="rerun()" disabled>Rerun</button>
 <button class="q" onclick="fetch('/quit').then(()=>{clearInterval(t);window.close();document.body.innerHTML='<p style=padding:20px>tgctl server stopped — you can close this tab.</p>'})">Quit server</button></header>
 <pre id="log"></pre>
 <script>
+const confirmMsg=%q;
+async function rerun(){if(confirmMsg&&!confirm(confirmMsg))return;const r=await fetch('/rerun',{method:'POST'});const p=await r.text();if(!r.ok){alert(p);return}
+  document.title=p.split('/').pop();document.querySelector('header b').textContent=p;document.getElementById('path').textContent=p;
+  n=0;document.getElementById('log').textContent='';const st=document.getElementById('st');st.textContent='running';st.className='run';clearInterval(t);t=setInterval(load,1500)}
+new MutationObserver(()=>{document.getElementById('rrb').disabled=document.getElementById('st').className==='run'}).observe(document.getElementById('st'),{attributes:true});
 const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function cls(l){const t=l.trimStart();
   if(/^(#|\s*#) /.test(l)&&/^# /.test(l)) return 'cmt';
