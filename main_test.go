@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -44,5 +45,24 @@ func TestLogPath(t *testing.T) {
 	got := logPath("/logs", Unit{Repo: "infra", Rel: "dev/waf", Abs: "/nonexistent"}, Req{Action: "state rm", Profile: "p"}, now)
 	if want := "/logs/infra/dev/waf/2026/11/19/state_rm/nobranch/2026-11-19T14-05-06-p-tf-state_rm.log"; got != want {
 		t.Errorf("got %s want %s", got, want)
+	}
+}
+
+func TestColorWriter(t *testing.T) {
+	var out bytes.Buffer
+	w := &colorWriter{w: &out}
+	// split writes mid-line: only complete lines are coloured and flushed
+	w.Write([]byte("  # aws_x.this will be upd"))
+	w.Write([]byte("ated in-place\n      + a = 1\n# OK in 3s\nplain\n"))
+	got := out.String()
+	for _, want := range []string{
+		"\x1b[1;94m  # aws_x.this will be updated in-place\x1b[0m\n",
+		"\x1b[92m      + a = 1\x1b[0m\n",
+		"\x1b[1;92;48;5;236m# OK in 3s\x1b[0m\n",
+		"plain\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
 	}
 }
