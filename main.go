@@ -314,6 +314,7 @@ const logPage = `<!doctype html><html><head><meta charset="utf-8"><title>%s</tit
   #st.run{color:#f5c542} #st.ok{color:#5fd36b} #st.fail{color:#ff6b6b}
   pre{margin:0;padding:12px 14px 60px;white-space:pre-wrap;word-break:break-all;tab-size:4}
   .add{color:#5fd36b}.del{color:#ff6b6b}.chg{color:#f5c542}.cmt{color:#8b8f9c}.err{color:#ff6b6b;font-weight:bold}.warn{color:#f5c542}.hd{color:#7fb8ff;font-weight:bold}.plan{color:#fff;font-weight:bold;background:#2e3140;display:inline-block;padding:0 6px}
+  .cp{float:right;background:0;padding:0 4px;font-size:12px;line-height:1.2;opacity:.5}.cp:hover{opacity:1}
 </style></head><body>
 <header><img src="/favicon.svg" width="22" height="22" alt=""><b>%s</b><span id="st" class="run">running</span><small id="path"></small>
 <label><input type="checkbox" id="follow" checked> follow</label>
@@ -332,9 +333,14 @@ function cls(l){const t=l.trimStart();
   if(/^# .* (will|must) be /.test(t)) return 'hd'; if(/^#/.test(t)) return 'cmt';
   return '';}
 let n=0,t=setInterval(load,1500);
+const blk=[];function cp(e,i){navigator.clipboard.writeText(blk[i]).then(()=>{e.textContent='✓';setTimeout(()=>e.textContent='📋',1000)})}
 async function load(){const r=await fetch('/raw');const s=await r.text();if(s.length===n)return;n=s.length;
   const lines=s.split('\n');document.getElementById('path').textContent=(lines.find(l=>l.startsWith('# log: '))||'').slice(7);
-  document.getElementById('log').innerHTML=lines.map(l=>{const c=cls(l);return c?'<span class="'+c+'">'+esc(l)+'</span>':esc(l)}).join('\n');
+  blk.length=0;let b=-1;
+  document.getElementById('log').innerHTML=lines.map(l=>{const c=cls(l);let h=c?'<span class="'+c+'">'+esc(l)+'</span>':esc(l);
+    if(c==='hd'){b=blk.push(l)-1;h='<button class="cp" title="copy block" onclick="cp(this,'+b+')">📋</button>'+h}
+    else if(b>=0){if(/^\w/.test(l))b=-1;else{blk[b]+='\n'+l;if(/^\s{4}\}\s*$/.test(l))b=-1}}
+    return h}).join('\n');
   const st=document.getElementById('st');
   if(/\n# OK in /.test(s)){st.textContent='OK';st.className='ok';clearInterval(t)}else if(/\n# FAILED/.test(s)){st.textContent='FAILED';st.className='fail';clearInterval(t)}
   if(document.getElementById('follow').checked)window.scrollTo(0,document.body.scrollHeight)}
