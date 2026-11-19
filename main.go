@@ -307,6 +307,9 @@ const logPage = `<!doctype html><html><head><meta charset="utf-8"><title>%s</tit
   body{margin:0;background:#1b1d23;color:#d6d8de;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
   header{position:sticky;top:0;background:#24262e;border-bottom:1px solid #3a3d47;padding:8px 14px;display:flex;gap:14px;align-items:center}
   header b{color:#fff} header small{color:#8b8f9c;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  header,header img,button{transition:all .15s}
+  header.small{padding:3px 14px;font-size:12px} header.small img{width:16px;height:16px} header.small button{padding:2px 8px}
+  header.small b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   button{background:#3a3d47;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer} button.q{background:#a33}
   #st.run{color:#f5c542} #st.ok{color:#5fd36b} #st.fail{color:#ff6b6b}
   pre{margin:0;padding:12px 14px 60px;white-space:pre-wrap;word-break:break-all;tab-size:4}
@@ -336,6 +339,7 @@ async function load(){const r=await fetch('/raw');const s=await r.text();if(s.le
   if(/\n# OK in /.test(s)){st.textContent='OK';st.className='ok';clearInterval(t)}else if(/\n# FAILED/.test(s)){st.textContent='FAILED';st.className='fail';clearInterval(t)}
   if(document.getElementById('follow').checked)window.scrollTo(0,document.body.scrollHeight)}
 load();
+addEventListener('scroll',()=>document.querySelector('header').classList.toggle('small',scrollY>40),{passive:true});
 </script></body></html>`
 
 // buildArgs: terragrunt (v0.73+/v1 "run --" syntax) or plain terraform/tofu argv.
