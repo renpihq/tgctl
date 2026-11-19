@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildArgs(t *testing.T) {
@@ -35,5 +36,13 @@ func TestBuildArgs(t *testing.T) {
 		if !c.err && strings.Join(got, " ") != c.want {
 			t.Errorf("%+v:\n got  %s\n want %s", c.req, strings.Join(got, " "), c.want)
 		}
+	}
+}
+
+func TestLogPath(t *testing.T) {
+	now := time.Date(2026, 11, 19, 14, 5, 6, 0, time.UTC)
+	got := logPath("/logs", Unit{Repo: "infra", Rel: "dev/waf", Abs: "/nonexistent"}, Req{Action: "state rm", Profile: "p"}, now)
+	if want := "/logs/infra/dev/waf/2026/11/19/state_rm/nobranch/2026-11-19T14-05-06-p-tf-state_rm.log"; got != want {
+		t.Errorf("got %s want %s", got, want)
 	}
 }
