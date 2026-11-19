@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -218,6 +219,7 @@ func run(args []string) error {
 		if err != nil {
 			return "", err
 		}
+		fmt.Fprintf(term, "\n%s rerun %s %s\n\n", strings.Repeat("─", 30), now.Format("15:04:05"), strings.Repeat("─", 30))
 		fmt.Fprintf(os.Stderr, "> rerun: %s\n", f.Name())
 		go func() {
 			// no interactive login from the browser: a stale session is reported in the log
@@ -226,7 +228,7 @@ func run(args []string) error {
 				e = stsCheck(r.Profile)
 			}
 			if e != nil {
-				fmt.Fprintf(io.MultiWriter(f, os.Stdout), "\n# FAILED: %v — run: aws sso login --profile %s\n", e, r.Profile)
+				fmt.Fprintf(io.MultiWriter(f, term), "\n# FAILED: %v — run: aws sso login --profile %s\n", e, r.Profile)
 				f.Close()
 			} else {
 				e = execute(u, r, argv, f, now, nil)
@@ -239,6 +241,59 @@ func run(args []string) error {
 	l.end(execute(u, r, argv, f, now, os.Stdin))
 	stop()
 	return l.err
+}
+
+// term is stdout with per-line ANSI colouring (same rules as the page) when it is a TTY
+// and NO_COLOR is unset; the log file always gets plain text.
+var term io.Writer = os.Stdout
+
+func init() {
+	if st, err := os.Stdout.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 && os.Getenv("NO_COLOR") == "" {
+		term = &colorWriter{w: os.Stdout}
+	}
+}
+
+type colorWriter struct {
+	w   io.Writer
+	buf []byte // partial line not yet flushed
+}
+
+var lineColors = []struct {
+	re  *regexp.Regexp
+	esc string
+}{
+	{regexp.MustCompile(`^# OK in`), "1;92;48;5;236"},
+	{regexp.MustCompile(`^# FAILED`), "1;91;48;5;236"},
+	{regexp.MustCompile(`^\s*(Error|│ Error|ERRO|\* Failed)|# FAILED`), "1;91"},
+	{regexp.MustCompile(`^\s*(Warning|│ Warning|WARN)`), "33"},
+	{regexp.MustCompile(`^\s*(Plan:|Apply complete|No changes)`), "1;97;48;5;236"},
+	{regexp.MustCompile(`^\s*# .* (will|must) be `), "1;94"},
+	{regexp.MustCompile(`^\s*#`), "90"},
+	{regexp.MustCompile(`^\s*(\+|-/\+)`), "92"},
+	{regexp.MustCompile(`^\s*-([^-]|$)`), "91"},
+	{regexp.MustCompile(`^\s*~`), "93"},
+}
+
+func (c *colorWriter) Write(p []byte) (int, error) {
+	c.buf = append(c.buf, p...)
+	for {
+		i := bytes.IndexByte(c.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(c.buf[:i])
+		c.buf = c.buf[i+1:]
+		for _, lc := range lineColors {
+			if lc.re.MatchString(line) {
+				line = "\x1b[" + lc.esc + "m" + line + "\x1b[0m"
+				break
+			}
+		}
+		if _, err := io.WriteString(c.w, line+"\n"); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
 }
 
 // stsCheck is the cheap sanity check after ssoValid: the profile resolves to an account.
@@ -266,7 +321,7 @@ func openLog(logRoot string, u Unit, r Req, argv []string, now time.Time) (*os.F
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(io.MultiWriter(f, os.Stdout), "# %s\n# AWS_PROFILE=%s\n# %s %s\n# log: %s\n\n", now.Format(time.RFC3339), r.Profile, u.Tool, strings.Join(argv, " "), logFile)
+	fmt.Fprintf(io.MultiWriter(f, term), "# %s\n# AWS_PROFILE=%s\n# %s %s\n# log: %s\n\n", now.Format(time.RFC3339), r.Profile, u.Tool, strings.Join(argv, " "), logFile)
 	return f, nil
 }
 
@@ -274,7 +329,7 @@ func openLog(logRoot string, u Unit, r Req, argv []string, now time.Time) (*os.F
 // stdin is os.Stdin from the CLI and nil (no TTY) for reruns from the page.
 func execute(u Unit, r Req, argv []string, f *os.File, now time.Time, stdin io.Reader) error {
 	defer f.Close()
-	w := io.MultiWriter(f, os.Stdout)
+	w := io.MultiWriter(f, term)
 	c := exec.Command(u.Tool, argv...)
 	c.Dir = u.Abs
 	c.Env = append(os.Environ(), "AWS_PROFILE="+r.Profile, "TF_IN_AUTOMATION=1", "TF_DATA_DIR=", "TG_NO_COLOR=1", "TG_LOG_FORMAT=bare", "NO_COLOR=1", "TERM=dumb")
@@ -401,18 +456,21 @@ func openBrowser(url string) {
 const logPage = `<!doctype html><html><head><meta charset="utf-8"><title>%s</title><link rel="icon" href="/favicon.svg">
 <style>
   body{margin:0;background:#1b1d23;color:#d6d8de;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
-  header{position:sticky;top:0;background:#24262e;border-bottom:1px solid #3a3d47;padding:8px 14px;display:flex;gap:14px;align-items:center}
-  header b{color:#fff} header small{color:#8b8f9c;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  header,header img,button{transition:all .15s}
-  header.small{padding:3px 14px;font-size:12px} header.small img{width:16px;height:16px} header.small button{padding:2px 8px}
-  header.small b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  button{background:#3a3d47;color:#fff;border:0;border-radius:4px;padding:5px 10px;cursor:pointer} button.q{background:#a33}
-  #st.run{color:#f5c542} #st.ok{color:#5fd36b} #st.fail{color:#ff6b6b}
+  header{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:12px;padding:10px 16px;background:#22242c;border-bottom:1px solid #30333e;box-shadow:0 2px 10px #0007;transition:padding .15s}
+  header img{width:22px;height:22px;flex:none;transition:width .15s,height .15s}
+  .t{flex:1;min-width:0;line-height:1.3} .t b{display:block;color:#fff;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .t small{display:block;color:#7c8090;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+  #st{flex:none;font-size:11px;font-weight:bold;letter-spacing:.5px;padding:2px 8px;border-radius:10px;text-transform:uppercase}
+  #st.run{color:#1b1d23;background:#f5c542} #st.ok{color:#1b1d23;background:#5fd36b} #st.fail{color:#fff;background:#d94848}
+  label{flex:none;font-size:12px;color:#aab;display:flex;align-items:center;gap:4px}
+  button{background:#2d303a;color:#dfe2ea;border:1px solid #3d414d;border-radius:6px;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer;transition:background .1s}
+  button:hover{background:#3a3e4b} button:disabled{opacity:.4;cursor:default} button.q{color:#ff8a8a;border-color:#6a3030} button.q:hover{background:#4a2626}
+  header.small{padding:3px 16px} header.small img{width:16px;height:16px} header.small .t b{font-size:12px} header.small .t small{display:none} header.small button{padding:1px 8px}
   pre{margin:0;padding:12px 14px 60px;white-space:pre-wrap;word-break:break-all;tab-size:4}
   .add{color:#5fd36b}.del{color:#ff6b6b}.chg{color:#f5c542}.cmt{color:#8b8f9c}.err{color:#ff6b6b;font-weight:bold}.warn{color:#f5c542}.hd{color:#7fb8ff;font-weight:bold}.plan{color:#fff;font-weight:bold;background:#2e3140;display:inline-block;padding:0 6px}
-  .cp{float:right;background:0;padding:0 4px;font-size:12px;line-height:1.2;opacity:.5}.cp:hover{opacity:1}
+  .cp{display:inline-block;vertical-align:-2px;width:16px;height:16px;padding:0;margin-right:6px;border:0;background:0;color:#7c8090;line-height:1}.cp:hover{color:#fff}.cp svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
 </style></head><body>
-<header><img src="/favicon.svg" width="22" height="22" alt=""><b>%s</b><span id="st" class="run">running</span><small id="path"></small>
+<header><img src="/favicon.svg" alt=""><div class="t"><b>%s</b><small id="path"></small></div><span id="st" class="run">running</span>
 <label><input type="checkbox" id="follow" checked> follow</label>
 <button title="copy log to clipboard" onclick="fetch('/raw').then(r=>r.text()).then(t=>navigator.clipboard.writeText(t)).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
 <button onclick="location.href='/raw?view=1'">raw</button>
@@ -435,12 +493,13 @@ function cls(l){const t=l.trimStart();
   if(/^# .* (will|must) be /.test(t)) return 'hd'; if(/^#/.test(t)) return 'cmt';
   return '';}
 let n=0,t=setInterval(load,1500);
-const blk=[];function cp(e,i){navigator.clipboard.writeText(blk[i]).then(()=>{e.textContent='✓';setTimeout(()=>e.textContent='📋',1000)})}
+const ICO='<svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',OK='<svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 7"/></svg>';
+const blk=[];function cp(e,i){navigator.clipboard.writeText(blk[i]).then(()=>{e.innerHTML=OK;setTimeout(()=>e.innerHTML=ICO,1000)})}
 async function load(){const r=await fetch('/raw');const s=await r.text();if(s.length===n)return;n=s.length;
   const lines=s.split('\n');document.getElementById('path').textContent=(lines.find(l=>l.startsWith('# log: '))||'').slice(7);
   blk.length=0;let b=-1;
   document.getElementById('log').innerHTML=lines.map(l=>{const c=cls(l);let h=c?'<span class="'+c+'">'+esc(l)+'</span>':esc(l);
-    if(c==='hd'){b=blk.push(l)-1;h='<button class="cp" title="copy block" onclick="cp(this,'+b+')">📋</button>'+h}
+    if(c==='hd'){b=blk.push(l)-1;h='<button class="cp" title="copy block" onclick="cp(this,'+b+')">'+ICO+'</button>'+h}
     else if(b>=0){if(/^\w/.test(l))b=-1;else{blk[b]+='\n'+l;if(/^\s{4}\}\s*$/.test(l))b=-1}}
     return h}).join('\n');
   const st=document.getElementById('st');
