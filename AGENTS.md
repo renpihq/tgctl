@@ -17,7 +17,7 @@ Single-file Go CLI (`main.go`, stdlib only) that runs one terragrunt/terraform a
 - Terse answers, no narration. Does the apply himself; the tool must never apply without the prompt.
 - fish shell on WSL; `awsp <profile>` / `awslogin` are his functions in `~/.config/fish/functions/`.
 - Wants copy-paste-ready commands, grouped per item, no env-var indirection in instructions.
-- Binary symlinked at `~/.local/bin/tgctl`. Rebuild: `go build -o tgctl .` (binary is in-tree, keep it out of any future git repo).
+- Binary symlinked at `~/.local/bin/tgctl`. Rebuild: `go build -o tgctl .` (binary is in-tree, gitignored). Releases: tag `vX.Y.Z` → GitHub Actions + GoReleaser (`.goreleaser.yaml`) publish binaries; `install.sh` fetches the latest. Module path `github.com/renpihq/tgctl` so `go install` works.
 
 ## Verify
 `go vet ./... && go test ./...` (argv builder cases) then a real run: `cd <unit> && tgctl . validate --profile <p>`; for the page, drive it under a pty (`python3 -c 'import pty…'`) because Enter is read from stdin.

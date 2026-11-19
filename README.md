@@ -31,13 +31,30 @@ Running infrastructure changes by hand leaves no trace and repeats the same chor
 
 ## Install
 
+Prebuilt binary (Linux, macOS, Windows; amd64/arm64) into `~/.local/bin`:
+
 ```sh
-git clone <this repo> && cd tgctl
-go build -o tgctl .
-install -m 755 tgctl ~/.local/bin/        # or anywhere on PATH
+curl -fsSL https://raw.githubusercontent.com/renpihq/tgctl/main/install.sh | sh
 ```
 
-Requirements: Go ≥ 1.22 to build; at runtime `terragrunt` (≥ 0.73, "run --" syntax) and/or `terraform`/`tofu`, `aws` CLI v2, `git`. Optional: `fzf` for interactive picking (only needed when a choice is ambiguous), a browser opener (`wslview`, `xdg-open`, `open` or `cmd.exe` are tried in that order).
+Or download an archive from the [releases page](https://github.com/renpihq/tgctl/releases) and put `tgctl` on your PATH.
+
+With Go ≥ 1.22:
+
+```sh
+go install github.com/renpihq/tgctl@latest
+```
+
+From source:
+
+```sh
+git clone https://github.com/renpihq/tgctl && cd tgctl
+go build -o tgctl . && install -m 755 tgctl ~/.local/bin/
+```
+
+Check with `tgctl --version`. Releases are cut by pushing a tag: `git tag v0.1.0 && git push origin v0.1.0` (GoReleaser builds and publishes via GitHub Actions).
+
+Requirements at runtime: `terragrunt` (≥ 0.73, "run --" syntax) and/or `terraform`/`tofu`, `aws` CLI v2, `git`. Optional: `fzf` for interactive picking (only needed when a choice is ambiguous), a browser opener (`wslview`, `xdg-open`, `open` or `cmd.exe` are tried in that order).
 
 ## Usage
 
