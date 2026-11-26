@@ -72,7 +72,6 @@ const usage = `tgctl [UNIT] [ACTION] [flags]   run one terragrunt/terraform acti
   --opt X           init: reconfigure upgrade migrate-state   plan: destroy refresh-only target
                     apply: destroy target   destroy: target   (repeatable)
   --resource R      address for state show/rm and --opt target
-  --version         print version
 
   tgctl logs        browse all past logs under $TGCTL_LOGS in the browser (use ./logs for a unit named logs)
 
@@ -84,9 +83,8 @@ http://127.0.0.1:<port>/ (printed at start; TGCTL_PORT pins the port).
   tgctl . plan
   tgctl dev/waf apply --profile my-profile
   tgctl prod "state show" --resource 'module.alb.aws_lb.this[0]'
+  tgctl logs
 `
-
-var version = "dev" // set by goreleaser -X main.version
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -116,9 +114,6 @@ func run(args []string) error {
 		switch {
 		case a == "-h" || a == "--help" || a == "help":
 			fmt.Print(usage)
-			return nil
-		case a == "--version":
-			fmt.Println("tgctl", version)
 			return nil
 		case a == "--all":
 			r.All = true
