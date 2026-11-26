@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,16 +72,41 @@ func TestColorWriter(t *testing.T) {
 
 func TestLogPage(t *testing.T) {
 	rec := httptest.NewRecorder()
-	render(rec, logView{Title: "x.log", Log: "/l/x.log", Raw: "/raw", Confirm: `Really rerun "apply"?`})
+	render(rec, logView{Title: "x.log", Log: "/l/x.log", Raw: "/raw", Confirm: `Really rerun "apply"?`, Live: true})
 	live := rec.Body.String()
+	rec = httptest.NewRecorder()
+	render(rec, logView{Title: "x.log", Log: "/l/x.log", Raw: "/raw?p=a%2Fx.log"})
+	browse := rec.Body.String()
 	for _, c := range []struct{ s, want string }{
 		{live, "const RAW=\"/raw\",confirmMsg=\"Really rerun \\\"apply\\\"?\";"}, {live, `id="rrb"`}, {live, `/quit`},
+		{browse, `const RAW="/raw?p=a%2Fx.log",confirmMsg="";`}, {browse, `class="bk" href="/"`},
 	} {
 		if !strings.Contains(c.s, c.want) {
 			t.Errorf("missing %q", c.want)
 		}
 	}
-	if strings.Contains(live, "ZgotmplZ") {
-		t.Errorf("template mangled: %s", live)
+	for _, s := range []string{live, browse} {
+		if strings.Contains(s, "ZgotmplZ") || strings.Contains(browse, `id="rrb"`) {
+			t.Errorf("template mangled: %s", s)
+		}
+	}
+}
+
+func TestLogsServer(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "r/u"), 0o755)
+	os.WriteFile(filepath.Join(root, "r/u/2026-01-01T00-00-00-p-tf-plan.log"), []byte("# hdr\nout\n\n# OK in 3s\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "r/u/2026-01-02T00-00-00-p-tf-plan.log"), []byte("# hdr\n\n# FAILED after 1s: x\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "secret.txt"), []byte("nope"), 0o644)
+	if got := logStatus(filepath.Join(root, "r/u/2026-01-01T00-00-00-p-tf-plan.log")); got != "ok" {
+		t.Errorf("status %s", got)
+	}
+	h := rawHandler(underRoot(root))
+	for q, code := range map[string]int{"p=r/u/2026-01-01T00-00-00-p-tf-plan.log": 200, "p=../etc/passwd": 400, "p=/etc/passwd": 400, "": 400} {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest("GET", "/raw?"+q, nil))
+		if rec.Code != code {
+			t.Errorf("%q: %d want %d", q, rec.Code, code)
+		}
 	}
 }

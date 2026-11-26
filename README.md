@@ -29,6 +29,7 @@ Running infrastructure changes by hand leaves no trace and repeats the same chor
   with a header (time, profile, exact command, log path) and an `# OK in …` / `# FAILED after …` footer. Output is streamed to the terminal at the same time, colour codes stripped.
 - **Live view** — each run serves the log on `http://127.0.0.1:<port>/` and opens it in the browser: Terraform diff colouring (`+` `-` `~`), error/warning highlighting, status badge, follow toggle, raw view, copy to clipboard, and a *Quit server* button. The page stays up after the run until you press Enter in the terminal or Quit on the page.
   A *Rerun* button runs the exact same command again (same unit, profile, options) into a new log file and switches the page to it; `apply`, `destroy` and `state rm` ask for confirmation in the browser first. A rerun never logs in: an expired SSO session is reported as `# FAILED` in the new log.
+- **Log browser** — `tgctl logs` lists every log under `$TGCTL_LOGS` (newest first, OK/FAILED badge, substring filter) and opens any of them in the same viewer.
 
 ## Install
 
@@ -89,6 +90,7 @@ tgctl dev/waf apply --profile my-profile
 tgctl prod "state list" --profile it-aws-admin
 tgctl prod plan --opt target --resource 'module.alb.aws_lb.this[0]'
 TGCTL_PORT=8921 tgctl . plan            # fixed port for the live page
+tgctl logs                              # browse every past log in the browser
 ```
 
 ## Configuration
