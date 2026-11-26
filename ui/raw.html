@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><body style="margin:0;background:#1b1d23;color:#d6d8de"><pre id="l" style="padding:12px;font:14px/1.5 ui-monospace,monospace;white-space:pre-wrap"></pre>
+<script>const u=new URL(location);u.searchParams.delete('view');let n=0;
+async function f(){const s=await (await fetch(u)).text();if(s.length===n)return;n=s.length;document.getElementById('l').textContent=s;window.scrollTo(0,document.body.scrollHeight);if(/\n# (OK in|FAILED)/.test(s))clearInterval(t)}
+const t=setInterval(f,1500);f()</script>

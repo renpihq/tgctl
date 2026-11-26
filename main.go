@@ -5,10 +5,11 @@ package main
 
 import (
 	"bytes"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -39,6 +40,13 @@ var (
 
 //go:embed assets/icon.svg
 var iconSVG []byte
+
+//go:embed ui
+var ui embed.FS
+var logTmpl = template.Must(template.ParseFS(ui, "ui/log.html"))
+
+// logView feeds ui/log.html.
+type logView struct{ Title, Log, Raw, Confirm string }
 
 type Unit struct{ Repo, Rel, Abs, Tool string }
 
@@ -364,37 +372,15 @@ type live struct {
 func (l *live) path() string  { l.mu.Lock(); defer l.mu.Unlock(); return l.logFile }
 func (l *live) end(err error) { l.mu.Lock(); l.running, l.err = false, err; l.mu.Unlock() }
 
-// serveLog serves the log on a loopback port with a live-updating page, opens the browser,
+// serveLog serves the running log with a live-updating page (ui/log.html), opens the browser,
 // and returns a stop func that waits for Enter in the terminal or the Quit button on the page.
-// TGCTL_PORT pins the port (default: random); TGCTL_BROWSER overrides the opener.
 func serveLog(l *live) func() {
-	ln, err := net.Listen("tcp", "127.0.0.1:"+env("TGCTL_PORT", "0"))
-	if err != nil {
-		return func() {}
-	}
-	quit := make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		lf := l.path()
-		fmt.Fprintf(w, logPage, filepath.Base(lf), lf, l.confirm)
+		render(w, logView{Title: filepath.Base(lf), Log: lf, Raw: "/raw", Confirm: l.confirm})
 	})
-	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write(iconSVG)
-	})
-	mux.HandleFunc("/raw", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := os.ReadFile(l.path())
-		if r.URL.Query().Get("view") == "" { // fetch() from the page: plain text
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Write(b)
-			return
-		}
-		// human "raw" view: uncoloured but still live
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#1b1d23;color:#d6d8de"><pre id="l" style="padding:12px;font:14px/1.5 ui-monospace,monospace;white-space:pre-wrap"></pre>
-<script>let n=0;async function f(){const s=await (await fetch('/raw')).text();if(s.length===n)return;n=s.length;document.getElementById('l').textContent=s;window.scrollTo(0,document.body.scrollHeight);if(/\n# (OK in|FAILED)/.test(s))clearInterval(t)}const t=setInterval(f,1500);f()</script>`)
-	})
+	mux.HandleFunc("/raw", rawHandler(func(*http.Request) (string, error) { return l.path(), nil }))
 	mux.HandleFunc("/rerun", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -420,6 +406,21 @@ func serveLog(l *live) func() {
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprint(w, p)
 	})
+	return serve(mux, "live")
+}
+
+// serve adds /favicon.svg and /quit, listens on 127.0.0.1 (TGCTL_PORT pins the port, default random),
+// opens the browser (TGCTL_BROWSER overrides) and returns a stop func that waits for Enter or /quit.
+func serve(mux *http.ServeMux, what string) func() {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+env("TGCTL_PORT", "0"))
+	if err != nil {
+		return func() {}
+	}
+	quit := make(chan struct{}, 1)
+	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write(iconSVG)
+	})
 	mux.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "bye")
 		select {
@@ -430,14 +431,39 @@ func serveLog(l *live) func() {
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 	url := fmt.Sprintf("http://%s/", ln.Addr())
-	fmt.Fprintf(os.Stderr, "> live: %s\n", url)
+	fmt.Fprintf(os.Stderr, "> %s: %s\n", what, url)
 	openBrowser(url)
 	return func() {
-		fmt.Fprintf(os.Stderr, "> log at %s — press Enter here or Quit on the page\n", url)
+		fmt.Fprintf(os.Stderr, "> %s at %s — press Enter here or Quit on the page\n", what, url)
 		go func() { fmt.Scanln(); quit <- struct{}{} }()
 		<-quit
 		srv.Close()
 	}
+}
+
+// rawHandler serves a log file as text/plain for the page's fetch(), or ui/raw.html with ?view=1.
+func rawHandler(file func(*http.Request) (string, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("view") != "" {
+			b, _ := ui.ReadFile("ui/raw.html")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(b)
+			return
+		}
+		p, err := file(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b, _ := os.ReadFile(p)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write(b)
+	}
+}
+
+func render(w http.ResponseWriter, v logView) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	logTmpl.Execute(w, v)
 }
 
 func openBrowser(url string) {
@@ -452,62 +478,6 @@ func openBrowser(url string) {
 		}
 	}
 }
-
-const logPage = `<!doctype html><html><head><meta charset="utf-8"><title>%s</title><link rel="icon" href="/favicon.svg">
-<style>
-  body{margin:0;background:#1b1d23;color:#d6d8de;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
-  header{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:12px;padding:10px 16px;background:#22242c;border-bottom:1px solid #30333e;box-shadow:0 2px 10px #0007;transition:padding .15s}
-  header img{width:22px;height:22px;flex:none;transition:width .15s,height .15s}
-  .t{flex:1;min-width:0;line-height:1.3} .t b{display:block;color:#fff;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .t small{display:block;color:#7c8090;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
-  #st{flex:none;font-size:11px;font-weight:bold;letter-spacing:.5px;padding:2px 8px;border-radius:10px;text-transform:uppercase}
-  #st.run{color:#1b1d23;background:#f5c542} #st.ok{color:#1b1d23;background:#5fd36b} #st.fail{color:#fff;background:#d94848}
-  label{flex:none;font-size:12px;color:#aab;display:flex;align-items:center;gap:4px}
-  button{background:#2d303a;color:#dfe2ea;border:1px solid #3d414d;border-radius:6px;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer;transition:background .1s}
-  button:hover{background:#3a3e4b} button:disabled{opacity:.4;cursor:default} button.q{color:#ff8a8a;border-color:#6a3030} button.q:hover{background:#4a2626}
-  header.small{padding:3px 16px} header.small img{width:16px;height:16px} header.small .t b{font-size:12px} header.small .t small{display:none} header.small button{padding:1px 8px}
-  pre{margin:0;padding:12px 14px 60px;white-space:pre-wrap;word-break:break-all;tab-size:4}
-  .add{color:#5fd36b}.del{color:#ff6b6b}.chg{color:#f5c542}.cmt{color:#8b8f9c}.err{color:#ff6b6b;font-weight:bold}.warn{color:#f5c542}.hd{color:#7fb8ff;font-weight:bold}.plan{color:#fff;font-weight:bold;background:#2e3140;display:inline-block;padding:0 6px}
-  .cp{display:inline-block;vertical-align:-2px;width:16px;height:16px;padding:0;margin-right:6px;border:0;background:0;color:#7c8090;line-height:1}.cp:hover{color:#fff}.cp svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
-</style></head><body>
-<header><img src="/favicon.svg" alt=""><div class="t"><b>%s</b><small id="path"></small></div><span id="st" class="run">running</span>
-<label><input type="checkbox" id="follow" checked> follow</label>
-<button title="copy log to clipboard" onclick="fetch('/raw').then(r=>r.text()).then(t=>navigator.clipboard.writeText(t)).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
-<button onclick="location.href='/raw?view=1'">raw</button>
-<button id="rrb" title="run the same command again into a new log" onclick="rerun()" disabled>Rerun</button>
-<button class="q" onclick="fetch('/quit').then(()=>{clearInterval(t);window.close();document.body.innerHTML='<p style=padding:20px>tgctl server stopped — you can close this tab.</p>'})">Quit server</button></header>
-<pre id="log"></pre>
-<script>
-const confirmMsg=%q;
-async function rerun(){if(confirmMsg&&!confirm(confirmMsg))return;const r=await fetch('/rerun',{method:'POST'});const p=await r.text();if(!r.ok){alert(p);return}
-  document.title=p.split('/').pop();document.querySelector('header b').textContent=p;document.getElementById('path').textContent=p;
-  n=0;document.getElementById('log').textContent='';const st=document.getElementById('st');st.textContent='running';st.className='run';clearInterval(t);t=setInterval(load,1500)}
-new MutationObserver(()=>{document.getElementById('rrb').disabled=document.getElementById('st').className==='run'}).observe(document.getElementById('st'),{attributes:true});
-const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-function cls(l){const t=l.trimStart();
-  if(/^(#|\s*#) /.test(l)&&/^# /.test(l)) return 'cmt';
-  if(/^(Error|│ Error|ERRO|\* Failed)/.test(t)||/# FAILED/.test(l)) return 'err';
-  if(/^(Warning|│ Warning|WARN)/.test(t)) return 'warn';
-  if(/^Plan:|^Apply complete|^No changes|^# OK in/.test(t)) return 'plan';
-  if(/^(\+|-\/\+)/.test(t)) return 'add'; if(/^-/.test(t)&&!/^-{3,}/.test(t)) return 'del'; if(/^~/.test(t)) return 'chg';
-  if(/^# .* (will|must) be /.test(t)) return 'hd'; if(/^#/.test(t)) return 'cmt';
-  return '';}
-let n=0,t=setInterval(load,1500);
-const ICO='<svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',OK='<svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 7"/></svg>';
-const blk=[];function cp(e,i){navigator.clipboard.writeText(blk[i]).then(()=>{e.innerHTML=OK;setTimeout(()=>e.innerHTML=ICO,1000)})}
-async function load(){const r=await fetch('/raw');const s=await r.text();if(s.length===n)return;n=s.length;
-  const lines=s.split('\n');document.getElementById('path').textContent=(lines.find(l=>l.startsWith('# log: '))||'').slice(7);
-  blk.length=0;let b=-1;
-  document.getElementById('log').innerHTML=lines.map(l=>{const c=cls(l);let h=c?'<span class="'+c+'">'+esc(l)+'</span>':esc(l);
-    if(c==='hd'){b=blk.push(l)-1;h='<button class="cp" title="copy block" onclick="cp(this,'+b+')">'+ICO+'</button>'+h}
-    else if(b>=0){if(/^\w/.test(l))b=-1;else{blk[b]+='\n'+l;if(/^\s{4}\}\s*$/.test(l))b=-1}}
-    return h}).join('\n');
-  const st=document.getElementById('st');
-  if(/\n# OK in /.test(s)){st.textContent='OK';st.className='ok';clearInterval(t)}else if(/\n# FAILED/.test(s)){st.textContent='FAILED';st.className='fail';clearInterval(t)}
-  if(document.getElementById('follow').checked)window.scrollTo(0,document.body.scrollHeight)}
-load();
-addEventListener('scroll',()=>document.querySelector('header').classList.toggle('small',scrollY>40),{passive:true});
-</script></body></html>`
 
 // buildArgs: terragrunt (v0.73+/v1 "run --" syntax) or plain terraform/tofu argv.
 func buildArgs(r Req, u Unit) ([]string, error) {
