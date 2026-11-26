@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,8 +47,11 @@ var iconSVG []byte
 var ui embed.FS
 var logTmpl = template.Must(template.ParseFS(ui, "ui/log.html"))
 
-// logView feeds ui/log.html.
-type logView struct{ Title, Log, Raw, Confirm string }
+// logView feeds ui/log.html: Live = run page (rerun/quit buttons), else the browse view.
+type logView struct {
+	Title, Log, Raw, Confirm string
+	Live                     bool
+}
 
 type Unit struct{ Repo, Rel, Abs, Tool string }
 
@@ -68,6 +73,8 @@ const usage = `tgctl [UNIT] [ACTION] [flags]   run one terragrunt/terraform acti
                     apply: destroy target   destroy: target   (repeatable)
   --resource R      address for state show/rm and --opt target
   --version         print version
+
+  tgctl logs        browse all past logs under $TGCTL_LOGS in the browser (use ./logs for a unit named logs)
 
 Missing UNIT/ACTION/profile are picked with fzf. apply, destroy, state rm ask y/N.
 Log: $TGCTL_LOGS (default ~/logs)/<repo>/<unit>/<date>/<action>/<branch>/<ts>-<profile>-tf-<action>.log
@@ -92,6 +99,9 @@ func run(args []string) error {
 	home, _ := os.UserHomeDir()
 	root := env("TGCTL_ROOT", filepath.Join(home, "sources"))
 	logRoot := env("TGCTL_LOGS", filepath.Join(home, "logs"))
+	if len(args) == 1 && args[0] == "logs" {
+		return serveLogs(logRoot)
+	}
 	var unitQ string
 	var r Req
 	for i := 0; i < len(args); i++ {
@@ -378,7 +388,7 @@ func serveLog(l *live) func() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		lf := l.path()
-		render(w, logView{Title: filepath.Base(lf), Log: lf, Raw: "/raw", Confirm: l.confirm})
+		render(w, logView{Title: filepath.Base(lf), Log: lf, Raw: "/raw", Confirm: l.confirm, Live: true})
 	})
 	mux.HandleFunc("/raw", rawHandler(func(*http.Request) (string, error) { return l.path(), nil }))
 	mux.HandleFunc("/rerun", func(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +417,50 @@ func serveLog(l *live) func() {
 		fmt.Fprint(w, p)
 	})
 	return serve(mux, "live")
+}
+
+// serveLogs is `tgctl logs`: a browser over every log under logRoot (ui/logs.html), each one
+// opened in the same viewer as a live run minus rerun/quit.
+func serveLogs(logRoot string) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := ui.ReadFile("ui/logs.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(b)
+	})
+	mux.HandleFunc("/list", func(w http.ResponseWriter, r *http.Request) {
+		type entry struct {
+			Path   string `json:"path"`
+			Status string `json:"status"`
+		}
+		list := []entry{}
+		filepath.WalkDir(logRoot, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(p, ".log") {
+				rel, _ := filepath.Rel(logRoot, p)
+				list = append(list, entry{filepath.ToSlash(rel), logStatus(p)})
+			}
+			return nil
+		})
+		sort.Slice(list, func(i, j int) bool { // newest first: file names start with the timestamp
+			return filepath.Base(list[i].Path) > filepath.Base(list[j].Path)
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(list)
+	})
+	logFile := underRoot(logRoot)
+	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+		lf, err := logFile(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p := r.URL.Query().Get("p")
+		render(w, logView{Title: filepath.Base(p), Log: lf, Raw: "/raw?p=" + url.QueryEscape(p)})
+	})
+	mux.HandleFunc("/raw", rawHandler(logFile))
+	stop := serve(mux, "logs")
+	stop()
+	return nil
 }
 
 // serve adds /favicon.svg and /quit, listens on 127.0.0.1 (TGCTL_PORT pins the port, default random),
@@ -461,9 +515,42 @@ func rawHandler(file func(*http.Request) (string, error)) http.HandlerFunc {
 	}
 }
 
+// underRoot resolves ?p=<rel> to a file under root; anything escaping root is rejected.
+func underRoot(root string) func(*http.Request) (string, error) {
+	return func(r *http.Request) (string, error) {
+		p := r.URL.Query().Get("p")
+		if p == "" || !filepath.IsLocal(p) {
+			return "", errors.New("bad path")
+		}
+		return filepath.Join(root, p), nil
+	}
+}
+
 func render(w http.ResponseWriter, v logView) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	logTmpl.Execute(w, v)
+}
+
+// logStatus reads the footer: ok | fail | run (no footer yet, or killed).
+func logStatus(p string) string {
+	f, err := os.Open(p)
+	if err != nil {
+		return "run"
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+	buf := make([]byte, 200)
+	if st.Size() > 200 {
+		f.Seek(st.Size()-200, io.SeekStart)
+	}
+	n, _ := f.Read(buf)
+	switch tail := string(buf[:n]); {
+	case strings.Contains(tail, "\n# OK in "):
+		return "ok"
+	case strings.Contains(tail, "\n# FAILED"):
+		return "fail"
+	}
+	return "run"
 }
 
 func openBrowser(url string) {
