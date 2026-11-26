@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -64,5 +65,21 @@ func TestColorWriter(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %q", want, got)
 		}
+	}
+}
+
+func TestLogPage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	render(rec, logView{Title: "x.log", Log: "/l/x.log", Raw: "/raw", Confirm: `Really rerun "apply"?`})
+	live := rec.Body.String()
+	for _, c := range []struct{ s, want string }{
+		{live, "const RAW=\"/raw\",confirmMsg=\"Really rerun \\\"apply\\\"?\";"}, {live, `id="rrb"`}, {live, `/quit`},
+	} {
+		if !strings.Contains(c.s, c.want) {
+			t.Errorf("missing %q", c.want)
+		}
+	}
+	if strings.Contains(live, "ZgotmplZ") {
+		t.Errorf("template mangled: %s", live)
 	}
 }
